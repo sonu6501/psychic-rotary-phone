@@ -12,16 +12,57 @@ import pytz
 
 app = Flask(__name__)
 
+# ==========================================
+# ⚙️ ENVIRONMENT VARIABLES & CONFIGURATION
+# ==========================================
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
-if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-    print("⚠️ WARNING: Telegram Token ya Chat ID set nahi hai!")
+# आपकी एडमिन आईडी स्क्रीनशॉट से ली गई है
+ADMIN_IDS = [7278927637] 
 
+if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+    print("⚠️ WARNING: Telegram Token या Chat ID ठीक से सेट नहीं है! कृपया चेक करें।")
+
+# ==========================================
+# 📊 GLOBAL DATA STRUCTURES
+# ==========================================
 alerts_today = []
 stocks_data = {}
+user_states = {}  # मल्टी-स्टेप कमांड्स (जैसे ब्रॉडकास्ट) के लिए स्टेट मैनेज करेगा
+bot_settings = {
+    'is_paused': False  # एडमिन स्कैनिंग को रोक या चालू कर सकता है
+}
 
-# NSE Top 200 Stocks
+USERS_DB_FILE = 'users_db.json'
+
+# ==========================================
+# 🗄️ DATABASE MANAGEMENT FUNCTIONS
+# ==========================================
+def load_users():
+    """यूज़र्स का डेटा JSON फाइल से मेमोरी में लोड करता है।"""
+    if os.path.exists(USERS_DB_FILE):
+        try:
+            with open(USERS_DB_FILE, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error loading users DB: {e}")
+            return {}
+    return {}
+
+def save_users(users_data):
+    """मेमोरी के डेटा को वापस JSON फाइल में सुरक्षित रूप से सेव करता है।"""
+    try:
+        with open(USERS_DB_FILE, 'w') as f:
+            json.dump(users_data, f, indent=4)
+    except Exception as e:
+        print(f"Error saving users DB: {e}")
+
+bot_users = load_users()
+
+# ==========================================
+# 📈 STOCK & CRYPTO LISTS
+# ==========================================
 NSE_STOCKS = [
     "RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","HINDUNILVR","ITC","SBIN",
     "BHARTIARTL","KOTAKBANK","LT","AXISBANK","ASIANPAINT","MARUTI","SUNPHARMA",
@@ -51,13 +92,16 @@ NSE_STOCKS = [
     "THERMAX","BHEL","ABB","VOLTAS","BLUESTARCO","WHIRLPOOL","SYMPHONY","CROMPTON"
 ]
 
-# Crypto Pairs
 CRYPTO_PAIRS = [
     "BTC-USD","ETH-USD","SOL-USD","BNB-USD","XRP-USD",
     "ADA-USD","AVAX-USD","DOGE-USD","DOT-USD","MATIC-USD"
 ]
 
+# ==========================================
+# 📡 TELEGRAM API UTILITIES
+# ==========================================
 def send_message(chat_id, message, reply_markup=None):
+    """टेलीग्राम पर मैसेज भेजने का मुख्य फंक्शन"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         'chat_id': chat_id,
@@ -65,27 +109,89 @@ def send_message(chat_id, message, reply_markup=None):
         'parse_mode': 'HTML'
     }
     if reply_markup:
-        payload['reply_markup'] = json.dumps(reply_markup)
+        payload['reply_markup'] = reply_markup
     try:
         response = requests.post(url, json=payload, timeout=10)
         return response.json()
     except Exception as e:
-        print(f"Telegram error: {e}")
+        print(f"Telegram send_message error: {e}")
         return None
 
-def get_main_keyboard():
+def send_document(chat_id, document_path, caption=""):
+    """टेलीग्राम पर फाइल भेजने का फंक्शन (बैकअप के लिए)"""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument"
+    try:
+        with open(document_path, 'rb') as doc:
+            files = {'document': doc}
+            data = {'chat_id': chat_id, 'caption': caption}
+            response = requests.post(url, data=data, files=files, timeout=20)
+            return response.json()
+    except Exception as e:
+        print(f"Telegram send_document error: {e}")
+        return None
+
+# ==========================================
+# 🔐 AUTHENTICATION & KEYBOARDS
+# ==========================================
+def is_admin(chat_id):
+    return chat_id in ADMIN_IDS
+
+def is_banned(chat_id):
+    chat_id_str = str(chat_id)
+    if chat_id_str in bot_users:
+        return bot_users[chat_id_str].get('is_banned', False)
+    return False
+
+def get_user_keyboard():
+    """नॉर्मल यूज़र्स के लिए सुरक्षित कीबोर्ड"""
     return {
         'keyboard': [
             [{'text': '📊 Price Check'},    {'text': '🔥 All Active Stocks'}],
             [{'text': '📈 All BUY Stocks'}, {'text': '📉 All SELL Stocks'}],
             [{'text': '📋 Aaj Ke Alerts'},  {'text': '⏮ Last Alert'}],
             [{'text': '🏆 Top Gainers'},     {'text': '💀 Top Losers'}],
-            [{'text': '✅ Bot Status'},      {'text': '❓ Help'}]
+            [{'text': '❓ Help'}]
         ],
         'resize_keyboard': True,
         'persistent': True
     }
 
+def get_admin_keyboard():
+    """एडमिन के लिए सुपर पावर कीबोर्ड"""
+    return {
+        'keyboard': [
+            [{'text': '🛠 Admin Panel'},    {'text': '🔍 Force Scan'}],
+            [{'text': '📢 Broadcast'},      {'text': '💾 Backup DB'}],
+            [{'text': '⏸ Pause Bot'},       {'text': '▶️ Resume Bot'}],
+            [{'text': '👥 All Users'},       {'text': '✅ Bot Status'}],
+            [{'text': '📊 Price Check'},    {'text': '🔥 Active Stocks'}],
+        ],
+        'resize_keyboard': True,
+        'persistent': True
+    }
+
+def register_user(chat_id, first_name, username):
+    """नये यूजर को डेटाबेस में सेव करना और इंटरैक्शन ट्रैक करना"""
+    chat_id_str = str(chat_id)
+    if chat_id_str not in bot_users:
+        now = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%d-%m-%Y %H:%M:%S")
+        bot_users[chat_id_str] = {
+            'first_name': first_name,
+            'username': username,
+            'join_date': now,
+            'interactions': 1,
+            'is_banned': False
+        }
+        save_users(bot_users)
+        for admin in ADMIN_IDS:
+            send_message(admin, f"🚨 <b>New User Registered!</b>\n\n👤 Name: {first_name}\n🔗 Username: @{username}\n🆔 ID: <code>{chat_id}</code>")
+    else:
+        bot_users[chat_id_str]['interactions'] = bot_users[chat_id_str].get('interactions', 0) + 1
+        save_users(bot_users)
+
+# ==========================================
+# 🧮 MARKET ANALYSIS ALGORITHMS
+# ==========================================
 def calculate_ema(prices, period):
     prices = np.array(prices, dtype=float)
     k = 2.0 / (period + 1)
@@ -108,6 +214,7 @@ def calculate_rsi(prices, period=14):
     return round(rsi, 2)
 
 def check_stock(symbol, is_crypto=False):
+    """स्टॉक या क्रिप्टो की लाइव एनालिसिस करता है"""
     try:
         ticker_sym = symbol if is_crypto else symbol + ".NS"
         ticker     = yf.Ticker(ticker_sym)
@@ -164,9 +271,15 @@ def format_alert_message(data):
         f"🕐 <b>Time:</b>      {now}"
     )
 
-def scan_all_stocks():
+def scan_all_stocks(triggered_by=None):
+    if bot_settings['is_paused'] and not triggered_by:
+        print("Bot is paused. Auto-scan skipped.")
+        return
+
     print("🔍 Scanning started...")
-    send_message(TELEGRAM_CHAT_ID, "🔍 <b>Scanning shuru hua...</b>\nSaare NSE + Crypto stocks check ho rahe hain!")
+    notify_chat = triggered_by if triggered_by else TELEGRAM_CHAT_ID
+    if triggered_by:
+        send_message(notify_chat, "🔍 <b>Force Scanning shuru hua...</b>\nसभी मार्केट्स चेक हो रहे हैं।")
 
     buy_signals  = []
     sell_signals = []
@@ -185,7 +298,7 @@ def scan_all_stocks():
             else:
                 sell_signals.append(result)
         done += 1
-        time.sleep(0.2)  # Rate limit avoid karo
+        time.sleep(0.2)  
 
     # Crypto scan
     for symbol in CRYPTO_PAIRS:
@@ -201,7 +314,7 @@ def scan_all_stocks():
         done += 1
         time.sleep(0.2)
 
-    # Summary bhejo
+    # Summary Generation
     summary = (
         f"✅ <b>Scan Complete!</b>\n\n"
         f"📊 Total Checked: {total}\n"
@@ -222,97 +335,155 @@ def scan_all_stocks():
             summary += f"📉 <b>{s['ticker']}</b> @ ₹{s['price']} | RSI: {s['rsi']}\n"
 
     if not buy_signals and not sell_signals:
-        summary += "😴 Koi signal nahi mila abhi."
+        summary += "😴 कोई नया सिग्नल नहीं मिला।"
 
-    # Telegram 4096 char limit
     if len(summary) > 4000:
         chunks = [summary[i:i+4000] for i in range(0, len(summary), 4000)]
         for chunk in chunks:
-            send_message(TELEGRAM_CHAT_ID, chunk)
+            send_message(notify_chat, chunk)
     else:
-        send_message(TELEGRAM_CHAT_ID, summary)
-
-    print("✅ Scan complete!")
+        send_message(notify_chat, summary)
 
 def auto_scan_loop():
     IST = pytz.timezone('Asia/Kolkata')
     while True:
         try:
-            now = datetime.now(IST)
-            # Weekdays 9am-4pm (9:00 to 16:59) scan karo har ghante
-            if now.weekday() < 5 and 9 <= now.hour <= 16:
-                scan_all_stocks()
-            else:
-                # Crypto 24/7 scan ke liye abhi yahi call rakha hai
-                scan_all_stocks()
-            time.sleep(3600)  # 1 ghanta
+            if not bot_settings['is_paused']:
+                now = datetime.now(IST)
+                # Weekdays 9am-4pm
+                if now.weekday() < 5 and 9 <= now.hour <= 16:
+                    scan_all_stocks()
+                else:
+                    # Crypto scans 24/7
+                    scan_all_stocks()
+            time.sleep(3600)  # 1 Hour delay
         except Exception as e:
             print(f"Auto scan error: {e}")
             time.sleep(60)
 
-# ─────────────────────────────────────────
-# COMMAND HANDLERS
-# ─────────────────────────────────────────
+# ==========================================
+# 👑 SUPER ADMIN COMMAND HANDLERS
+# ==========================================
 
-def handle_start(chat_id, first_name):
+def handle_admin_panel(chat_id):
+    total_users = len(bot_users)
+    banned_users = sum(1 for u in bot_users.values() if u.get('is_banned', False))
+    status_emoji = "⏸ PAUSED" if bot_settings['is_paused'] else "▶️ RUNNING"
+    
     message = (
-        f"🤖 <b>Namaste {first_name}! Black Devil Trading Bot</b>\n\n"
-        f"Main har ghante NSE + Crypto scan karta hoon!\n\n"
+        f"👑 <b>SUPER ADMIN PANEL</b> 👑\n\n"
+        f"🤖 <b>Bot Status:</b> {status_emoji}\n"
+        f"👥 <b>Total Users:</b> {total_users}\n"
+        f"🚫 <b>Banned Users:</b> {banned_users}\n"
+        f"🔥 <b>Active Stocks:</b> {len(stocks_data)}\n"
+        f"🔔 <b>Today Alerts:</b> {len(alerts_today)}\n\n"
+        f"<b>🛠️ Manual Admin Commands:</b>\n"
+        f"<code>/ban [user_id]</code> - किसी को बैन करें\n"
+        f"<code>/unban [user_id]</code> - किसी को अनबैन करें\n"
+    )
+    send_message(chat_id, message)
+
+def handle_broadcast_init(chat_id):
+    user_states[chat_id] = 'WAITING_FOR_BROADCAST'
+    send_message(chat_id, "📢 <b>Broadcast Mode Active:</b>\n\nकृपया वह मैसेज टाइप करें जो आप सभी यूज़र्स को भेजना चाहते हैं।\n\n(इसे कैंसिल करने के लिए 'cancel' टाइप करें)")
+
+def execute_broadcast(admin_chat_id, text):
+    if text.lower() == 'cancel':
+        user_states.pop(admin_chat_id, None)
+        send_message(admin_chat_id, "✅ ब्रॉडकास्ट कैंसिल कर दिया गया है।")
+        return
+
+    send_message(admin_chat_id, "⏳ ब्रॉडकास्ट शुरू हो रहा है... कृपया प्रतीक्षा करें।")
+    success = 0
+    failed = 0
+    
+    broadcast_msg = f"🔔 <b>Admin Update:</b>\n\n{text}"
+    
+    for uid, data in bot_users.items():
+        if not data.get('is_banned', False):
+            res = send_message(uid, broadcast_msg)
+            if res and res.get('ok'):
+                success += 1
+            else:
+                failed += 1
+            time.sleep(0.05) # Rate limit protection
+
+    user_states.pop(admin_chat_id, None)
+    send_message(admin_chat_id, f"✅ <b>Broadcast Complete!</b>\n\n📨 Successfully sent: {success}\n❌ Failed: {failed}")
+
+def handle_ban_unban(chat_id, text, action):
+    parts = text.split()
+    if len(parts) < 2:
+        send_message(chat_id, f"⚠️ सही फॉर्मेट का उपयोग करें: <code>/{action} 123456789</code>")
+        return
+    
+    target_id = parts[1]
+    if target_id not in bot_users:
+        send_message(chat_id, "❌ यह यूज़र डेटाबेस में नहीं मिला।")
+        return
+        
+    if action == 'ban':
+        bot_users[target_id]['is_banned'] = True
+        send_message(chat_id, f"🚫 यूज़र <code>{target_id}</code> को सफलतापूर्ण बैन कर दिया गया है।")
+        send_message(target_id, "🚫 <b>ACCOUNT BANNED</b>\n\nआपको एडमिन द्वारा बैन कर दिया गया है। आप अब इस बॉट का इस्तेमाल नहीं कर सकते।", reply_markup={"remove_keyboard": True})
+    else:
+        bot_users[target_id]['is_banned'] = False
+        send_message(chat_id, f"✅ यूज़र <code>{target_id}</code> को सफलतापूर्ण अनबैन कर दिया गया है।")
+        send_message(target_id, "✅ आपका अकाउंट एडमिन द्वारा अनबैन कर दिया गया है। आप फिर से बॉट का इस्तेमाल कर सकते हैं।", reply_markup=get_user_keyboard())
+    
+    save_users(bot_users)
+
+# ==========================================
+# 👤 GENERAL COMMAND HANDLERS
+# ==========================================
+
+def handle_start(chat_id, first_name, username):
+    register_user(chat_id, first_name, username)
+    admin_status = "👑 <b>Super Admin Access Granted</b>" if is_admin(chat_id) else "👤 <b>User Mode Active</b>"
+    
+    message = (
+        f"🤖 <b>नमस्ते {first_name}! Black Devil Trading Bot में आपका स्वागत है।</b>\n\n"
+        f"{admin_status}\n\n"
+        f"मैं लाइव मार्केट में NSE + Crypto स्कैन करता हूँ!\n\n"
         f"<b>Commands:</b>\n"
-        f"/scan — Abhi scan karo\n"
-        f"/price RELIANCE — Live price\n"
-        f"/allstocks — Active stocks\n"
-        f"/buy — BUY signals\n"
-        f"/sell — SELL signals\n"
-        f"/gainers — Top gainers\n"
-        f"/losers — Top losers\n"
-        f"/alerts — Aaj ke alerts\n"
-        f"/status — Bot status\n\n"
-        f"<i>👇 Buttons se bhi use karo!</i>"
+        f"/price RELIANCE — लाइव प्राइस चेक करें\n"
+        f"/allstocks — एक्टिव स्टॉक्स की लिस्ट\n"
+        f"/buy — BUY सिग्नल्स देखें\n"
+        f"/sell — SELL सिग्नल्स देखें\n"
+        f"/gainers — टॉप गेनर्स\n"
+        f"/alerts — आज के सभी अलर्ट्स\n\n"
+        f"<i>👇 नीचे दिए गए बटन्स का उपयोग करें!</i>"
     )
-    send_message(chat_id, message, reply_markup=get_main_keyboard())
+    
+    keyboard = get_admin_keyboard() if is_admin(chat_id) else get_user_keyboard()
+    send_message(chat_id, message, reply_markup=keyboard)
 
-def handle_help(chat_id):
-    message = (
-        "❓ <b>Sabhi Commands:</b>\n\n"
-        "🔍 /scan — Abhi saare stocks scan karo\n"
-        "📊 /price RELIANCE — Live price\n"
-        "🔥 /allstocks — Active stocks\n"
-        "📈 /buy — BUY signals\n"
-        "📉 /sell — SELL signals\n"
-        "🏆 /gainers — Top gainers\n"
-        "💀 /losers — Top losers\n"
-        "📋 /alerts — Aaj ke alerts\n"
-        "⏮ /last — Last alert\n"
-        "✅ /status — Bot stats\n"
-    )
-    send_message(chat_id, message, reply_markup=get_main_keyboard())
-
-def handle_status(chat_id):
-    now        = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%d-%m-%Y %H:%M:%S')
-    buy_count  = sum(1 for s in stocks_data.values() if s.get('action','').upper() == 'BUY')
-    sell_count = sum(1 for s in stocks_data.values() if s.get('action','').upper() == 'SELL')
-    message = (
-        f"✅ <b>Bot Status: ACTIVE</b>\n\n"
-        f"🟢 Server:  Running\n"
-        f"🟢 Scanner: Active (har ghante)\n"
-        f"🟢 Telegram: Connected\n\n"
-        f"📊 <b>Aaj Ki Stats:</b>\n"
-        f"🔔 Total Alerts:  {len(alerts_today)}\n"
-        f"📈 BUY Signals:   {buy_count}\n"
-        f"📉 SELL Signals:  {sell_count}\n"
-        f"🔥 Active Stocks: {len(stocks_data)}\n\n"
-        f"🕐 Time: {now}"
-    )
-    send_message(chat_id, message, reply_markup=get_main_keyboard())
+def handle_users_list(chat_id):
+    if not bot_users:
+        send_message(chat_id, "👥 अभी तक कोई यूज़र रजिस्टर नहीं हुआ है।")
+        return
+        
+    message = f"👥 <b>Registered Users ({len(bot_users)}):</b>\n\n"
+    for uid, data in bot_users.items():
+        name = data.get('first_name', 'Unknown')
+        uname = data.get('username', 'None')
+        banned = "🚫 BANNED" if data.get('is_banned', False) else "✅ ACTIVE"
+        message += f"👤 <b>{name}</b> (@{uname})\n🆔 <code>{uid}</code>\nСтатус: {banned}\n\n"
+        
+    if len(message) > 4000:
+        chunks = [message[i:i+4000] for i in range(0, len(message), 4000)]
+        for chunk in chunks:
+            send_message(chat_id, chunk)
+    else:
+        send_message(chat_id, message)
 
 def handle_price(chat_id, text):
     parts = text.strip().split()
     if len(parts) < 2:
-        send_message(chat_id, "⚠️ Symbol batao!\n\nExample: <code>/price RELIANCE</code>")
+        send_message(chat_id, "⚠️ स्टॉक का सिंबल बताएं!\n\nExample: <code>/price RELIANCE</code>")
         return
     symbol = parts[1].upper()
-    send_message(chat_id, f"🔍 <b>{symbol}</b> ka price fetch ho raha hai...")
+    send_message(chat_id, f"🔍 <b>{symbol}</b> का प्राइस फेच हो रहा है...")
     try:
         ticker = yf.Ticker(symbol + ".NS")
         info   = ticker.history(period="5d", interval="1m")
@@ -335,30 +506,13 @@ def handle_price(chat_id, text):
             )
             send_message(chat_id, msg)
         else:
-            send_message(chat_id, f"❌ <b>{symbol}</b> ka data nahi mila!")
+            send_message(chat_id, f"❌ <b>{symbol}</b> का डेटा नहीं मिला!")
     except Exception as e:
         send_message(chat_id, f"❌ Error: {str(e)}")
 
-def handle_alerts(chat_id):
-    if not alerts_today:
-        send_message(chat_id, "📋 Aaj abhi tak koi alert nahi aaya.\n\n/scan karo!")
-        return
-    message = f"📋 <b>Aaj Ke Alerts ({len(alerts_today)}):</b>\n\n"
-    for alert in alerts_today[-15:]:
-        action  = alert.get('action', 'N/A').upper()
-        emoji   = '🟢' if action == 'BUY' else '🔴'
-        message += f"{emoji} <b>{alert.get('ticker','?')}</b> — {action} @ ₹{alert.get('price','?')} | {alert.get('time','')}\n"
-    send_message(chat_id, message)
-
-def handle_last(chat_id):
-    if not alerts_today:
-        send_message(chat_id, "📋 Abhi tak koi alert nahi aaya.\n\n/scan karo!")
-        return
-    send_message(chat_id, format_alert_message(alerts_today[-1]))
-
 def handle_allstocks(chat_id, filter_action=None):
     if not stocks_data:
-        send_message(chat_id, "🔥 Koi active stock nahi hai.\n\n/scan likho — abhi scan karunga!")
+        send_message(chat_id, "🔥 कोई एक्टिव स्टॉक नहीं है। मार्केट कंडीशन न्यूट्रल हैं।")
         return
     if filter_action:
         filtered = {k: v for k, v in stocks_data.items() if v.get('action','').upper() == filter_action.upper()}
@@ -369,7 +523,7 @@ def handle_allstocks(chat_id, filter_action=None):
         title    = f"🔥 <b>Active Stocks ({len(filtered)}):</b>\n\n"
 
     if not filtered:
-        send_message(chat_id, f"❌ Koi {filter_action} stock nahi mila.\n\n/scan karo!")
+        send_message(chat_id, f"❌ कोई {filter_action} स्टॉक नहीं मिला।")
         return
 
     message = title
@@ -392,7 +546,7 @@ def handle_allstocks(chat_id, filter_action=None):
         send_message(chat_id, m)
 
 def handle_gainers_losers(chat_id, mode='gainers'):
-    send_message(chat_id, "📡 Data fetch ho raha hai... thoda wait karo!")
+    send_message(chat_id, "📡 डेटा फेच हो रहा है... थोड़ा इंतज़ार करें!")
     try:
         results = []
         check_list = NSE_STOCKS[:30]
@@ -422,73 +576,72 @@ def handle_gainers_losers(chat_id, mode='gainers'):
         send_message(chat_id, f"❌ Error: {str(e)}")
 
 def handle_button(chat_id, text, first_name):
+    # स्टेट चेकिंग (ब्रॉडकास्ट के लिए)
+    if chat_id in user_states and user_states[chat_id] == 'WAITING_FOR_BROADCAST':
+        execute_broadcast(chat_id, text)
+        return
+
+    # Normal Buttons
     if text == '📊 Price Check':
-        send_message(chat_id, "📊 Kaunse stock ka price chahiye?\n\nLikho: <code>/price RELIANCE</code>")
-    elif text == '🔥 All Active Stocks':
+        send_message(chat_id, "📊 कौनसे स्टॉक का प्राइस चाहिए?\n\nलिखें: <code>/price RELIANCE</code>")
+    elif text in ['🔥 All Active Stocks', '🔥 Active Stocks']:
         handle_allstocks(chat_id)
     elif text == '📈 All BUY Stocks':
         handle_allstocks(chat_id, filter_action='BUY')
     elif text == '📉 All SELL Stocks':
         handle_allstocks(chat_id, filter_action='SELL')
     elif text == '📋 Aaj Ke Alerts':
-        handle_alerts(chat_id)
+        if not alerts_today:
+            send_message(chat_id, "📋 आज अभी तक कोई अलर्ट नहीं आया।")
+        else:
+            msg = f"📋 <b>आज के अलर्ट्स ({len(alerts_today)}):</b>\n\n"
+            for al in alerts_today[-15:]:
+                em = '🟢' if al.get('action') == 'BUY' else '🔴'
+                msg += f"{em} <b>{al.get('ticker','?')}</b> — {al.get('action')} @ ₹{al.get('price','?')} | {al.get('time','')}\n"
+            send_message(chat_id, msg)
     elif text == '⏮ Last Alert':
-        handle_last(chat_id)
+        if alerts_today: send_message(chat_id, format_alert_message(alerts_today[-1]))
+        else: send_message(chat_id, "📋 कोई अलर्ट नहीं मिला।")
     elif text == '🏆 Top Gainers':
         handle_gainers_losers(chat_id, mode='gainers')
     elif text == '💀 Top Losers':
         handle_gainers_losers(chat_id, mode='losers')
+    
+    # Super Admin Buttons
+    elif text == '🛠 Admin Panel':
+        if is_admin(chat_id): handle_admin_panel(chat_id)
+    elif text == '🔍 Force Scan':
+        if is_admin(chat_id):
+            send_message(chat_id, "🔍 Force Scan शुरू हो रहा है... 2-3 मिनट लगेंगे!")
+            threading.Thread(target=scan_all_stocks, args=(chat_id,)).start()
+    elif text == '👥 All Users':
+        if is_admin(chat_id): handle_users_list(chat_id)
+    elif text == '📢 Broadcast':
+        if is_admin(chat_id): handle_broadcast_init(chat_id)
+    elif text == '💾 Backup DB':
+        if is_admin(chat_id):
+            send_document(chat_id, USERS_DB_FILE, caption="💾 <b>बॉट का डेटाबेस बैकअप</b>")
+    elif text == '⏸ Pause Bot':
+        if is_admin(chat_id):
+            bot_settings['is_paused'] = True
+            send_message(chat_id, "⏸ <b>बॉट रोक दिया गया है।</b>\nअब कोई ऑटोमैटिक स्कैनिंग नहीं होगी।")
+    elif text == '▶️ Resume Bot':
+        if is_admin(chat_id):
+            bot_settings['is_paused'] = False
+            send_message(chat_id, "▶️ <b>बॉट फिर से चालू कर दिया गया है।</b>\nऑटोमैटिक स्कैनिंग फिर से शुरू हो गई है।")
     elif text == '✅ Bot Status':
-        handle_status(chat_id)
-    elif text == '❓ Help':
-        handle_help(chat_id)
+        if is_admin(chat_id): handle_admin_panel(chat_id)
     else:
-        send_message(chat_id, "❓ /help likho!", reply_markup=get_main_keyboard())
+        keyboard = get_admin_keyboard() if is_admin(chat_id) else get_user_keyboard()
+        send_message(chat_id, "❓ कमांड समझ नहीं आई। मेनू का उपयोग करें!", reply_markup=keyboard)
 
-# ─────────────────────────────────────────
-# ROUTES
-# ─────────────────────────────────────────
+# ==========================================
+# 🌐 FLASK ROUTES
+# ==========================================
 
 @app.route('/')
 def home():
-    return jsonify({'status': '✅ Black Devil Bot Running!'})
-
-@app.route('/test', methods=['GET'])
-def test():
-    result = send_message(TELEGRAM_CHAT_ID, "✅ <b>Bot Test Successful!</b>\n\nBlack Devil Trading Bot active hai!")
-    if result and result.get('ok'):
-        return jsonify({'status': 'Test sent ✅'})
-    return jsonify({'status': 'Failed ❌'})
-
-@app.route('/scan_now', methods=['GET'])
-def scan_now():
-    thread = threading.Thread(target=scan_all_stocks)
-    thread.daemon = True
-    thread.start()
-    return jsonify({'status': '✅ Scan shuru ho gaya! Telegram check karo.'})
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    try:
-        if request.is_json:
-            data = request.get_json()
-        else:
-            raw = request.data.decode('utf-8')
-            try:
-                data = json.loads(raw)
-            except:
-                data = {'ticker': 'UNKNOWN', 'action': 'ALERT'}
-        data['time'] = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M')
-        alerts_today.append(data)
-        ticker = data.get('ticker', 'UNKNOWN')
-        stocks_data[ticker] = data
-        message = format_alert_message(data)
-        result  = send_message(TELEGRAM_CHAT_ID, message)
-        if result and result.get('ok'):
-            return jsonify({'status': 'success'}), 200
-        return jsonify({'status': 'error'}), 500
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+    return jsonify({'status': '✅ Black Devil Super Bot Running!', 'users': len(bot_users)})
 
 @app.route('/telegram', methods=['POST'])
 def telegram_updates():
@@ -496,60 +649,57 @@ def telegram_updates():
         update = request.get_json()
         if 'message' not in update:
             return jsonify({'status': 'ok'}), 200
+        
         msg        = update['message']
         chat_id    = msg['chat']['id']
         text       = msg.get('text', '')
         first_name = msg.get('from', {}).get('first_name', 'Friend')
+        username   = msg.get('from', {}).get('username', 'NoUsername')
 
+        # अगर यूजर बैन है, तो उसके सारे मैसेज इग्नोर कर दो
+        if is_banned(chat_id):
+            return jsonify({'status': 'ok'}), 200
+
+        register_user(chat_id, first_name, username)
+
+        # Admin Commands
+        if is_admin(chat_id):
+            if text.startswith('/ban '):
+                handle_ban_unban(chat_id, text, 'ban')
+                return jsonify({'status': 'ok'}), 200
+            elif text.startswith('/unban '):
+                handle_ban_unban(chat_id, text, 'unban')
+                return jsonify({'status': 'ok'}), 200
+
+        # Normal Commands
         if text.startswith('/start'):
-            handle_start(chat_id, first_name)
-        elif text.startswith('/help'):
-            handle_help(chat_id)
+            handle_start(chat_id, first_name, username)
         elif text.startswith('/price'):
             handle_price(chat_id, text)
-        elif text.startswith('/scan'):
-            send_message(chat_id, "🔍 Scan shuru ho raha hai... 2-3 minute lagenge!")
-            thread = threading.Thread(target=scan_all_stocks)
-            thread.daemon = True
-            thread.start()
-        elif text.startswith('/alerts'):
-            handle_alerts(chat_id)
-        elif text.startswith('/last'):
-            handle_last(chat_id)
-        elif text.startswith('/status'):
-            handle_status(chat_id)
-        elif text.startswith('/allstocks'):
-            handle_allstocks(chat_id)
-        elif text.startswith('/buy'):
-            handle_allstocks(chat_id, filter_action='BUY')
-        elif text.startswith('/sell'):
-            handle_allstocks(chat_id, filter_action='SELL')
-        elif text.startswith('/gainers'):
-            handle_gainers_losers(chat_id, mode='gainers')
-        elif text.startswith('/losers'):
-            handle_gainers_losers(chat_id, mode='losers')
         else:
             handle_button(chat_id, text, first_name)
 
         return jsonify({'status': 'ok'}), 200
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error in telegram updates: {e}")
         return jsonify({'status': 'error'}), 500
 
 @app.route('/set_webhook', methods=['GET'])
 def set_webhook():
     render_url = request.args.get('url', '')
     if not render_url:
-        return jsonify({'error': 'URL chahiye'}), 400
+        return jsonify({'error': 'URL आवश्यक है'}), 400
     webhook_url = f"{render_url}/telegram"
     api_url     = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={webhook_url}"
     response    = requests.get(api_url)
     result      = response.json()
     if result.get('ok'):
-        return jsonify({'status': '✅ Webhook set!', 'url': webhook_url})
+        return jsonify({'status': '✅ Webhook Set!', 'url': webhook_url})
     return jsonify({'status': '❌ Failed', 'error': result})
 
-# Auto scan start karo
+# ==========================================
+# 🚀 INITIALIZATION
+# ==========================================
 scanner_thread = threading.Thread(target=auto_scan_loop)
 scanner_thread.daemon = True
 scanner_thread.start()
