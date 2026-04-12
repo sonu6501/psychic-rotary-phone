@@ -304,5 +304,22 @@ def set_webhook():
     else:
         return jsonify({'status': '❌ Failed', 'error': result})
 
+ @app.route('/test', methods=['GET'])
+def test():
+    """Bot test karne ke liye"""
+    test_data = {
+        'ticker': 'RELIANCE',
+        'price': '2450.50',
+        'action': 'BUY',
+        'timeframe': '15m',
+        'strategy': 'Test Alert'
+    }
+    message = format_alert_message(test_data)
+    result = send_message(TELEGRAM_CHAT_ID, message)
+    if result and result.get('ok'):
+        return jsonify({'status': 'Test message sent! Check Telegram ✅'})
+    else:
+        return jsonify({'status': 'Failed ❌', 'error': result})
+        
 if __name__ == '__main__':
     app.run(debug=False, host='0.0.0.0', port=5000)
