@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 import requests
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 import threading
 import time
 import pandas as pd
@@ -16,43 +16,31 @@ app = Flask(__name__)
 # ⚙️ ENVIRONMENT VARIABLES & CONFIGURATION
 # ==========================================
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '-1003926102512') # Default Channel ID
 
-# मैंने आपके चैनल की ID हार्डकोड कर दी है ताकि मैसेज जाना कभी बंद न हो
-# (Screenshot se nikali gayi ID: -1003926102512)
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '-1003926102512')
-
-# आपकी एडमिन आईडी 
-ADMIN_IDS = [7278927637] 
-
-# 📢 FORCE SUBSCRIBE CONFIGURATION
-FORCE_CHANNEL_ID = "-1003926102512" # API checking ke liye Numeric ID
-FORCE_CHANNEL_LINK = "https://t.me/+vK7WE4K6T3U2ODc1" # User ke click karne ke liye aapka link
+# Force Subscribe Config
+FORCE_CHANNEL_ID = "-1003926102512" 
+FORCE_CHANNEL_LINK = "https://t.me/+vK7WE4K6T3U2ODc1" 
 
 if not TELEGRAM_TOKEN:
-    print("⚠️ WARNING: Telegram Token सेट नहीं है! कृपया चेक करें।")
+    print("⚠️ WARNING: Telegram Token set nahi hai!")
 
 # ==========================================
-# 📊 GLOBAL DATA STRUCTURES
+# 📊 GLOBAL DATA & STATE
 # ==========================================
 alerts_today = []
 stocks_data = {}
 user_states = {}  
-bot_settings = {
-    'is_paused': False  
-}
-
+bot_settings = {'is_paused': False}
 USERS_DB_FILE = 'users_db.json'
 
-# ==========================================
-# 🗄️ DATABASE MANAGEMENT FUNCTIONS
-# ==========================================
 def load_users():
     if os.path.exists(USERS_DB_FILE):
         try:
             with open(USERS_DB_FILE, 'r') as f:
                 return json.load(f)
         except Exception as e:
-            print(f"Error loading users DB: {e}")
+            print(f"Error loading users: {e}")
             return {}
     return {}
 
@@ -61,7 +49,7 @@ def save_users(users_data):
         with open(USERS_DB_FILE, 'w') as f:
             json.dump(users_data, f, indent=4)
     except Exception as e:
-        print(f"Error saving users DB: {e}")
+        print(f"Error saving users: {e}")
 
 bot_users = load_users()
 
@@ -78,47 +66,23 @@ NSE_STOCKS = [
     "BAJAJ-AUTO","TATACONSUM","BRITANNIA","HEROMOTOCO","UPL","DMART","ADANIGREEN",
     "ADANITRANS","SIEMENS","PIDILITIND","HAVELLS","MARICO","BERGEPAINT","COLPAL",
     "DABUR","GODREJCP","TATAPOWER","CANBK","PNB","BANKBARODA","FEDERALBNK",
-    "IDFCFIRSTB","BANDHANBNK","MUTHOOTFIN","CHOLAFIN","BAJAJHLDNG","SBICARD",
-    "MANAPPURAM","LICHSGFIN","M&M","MOTHERSON","BOSCHLTD","EXIDEIND","AMARAJABAT",
-    "BALKRISIND","MRF","CEATLTD","APOLLOTYRE","TIINDIA","SCHAEFFLER","SUNDRMFAST",
-    "ZOMATO","NYKAA","PAYTM","POLICYBZR","DELHIVERY","IRCTC","INDIGO","SPICEJET",
-    "TRENT","VEDL","NMDC","SAIL","HINDZINC","NATIONALUM","MOIL","GMRINFRA",
-    "IRB","ASHOKA","KNRCON","NCC","HCC","PNCINFRA","AHLUCONT","PATELENG",
-    "INOXWIND","SUZLON","TATAELXSI","LTTS","PERSISTENT","COFORGE","MPHASIS",
-    "HEXAWARE","KPITTECH","CYIENT","ZENSAR","NIITTECH","RAMSARUP","MASTEK",
-    "SONACOMS","RVNL","IRFC","HUDCO","REC","PFC","SJVN","NHPC","TORNTPOWER",
-    "CESC","JSWENERGY","RENUKA","TRIVENI","DWARIKESH","BALRAMCHIN","EID",
-    "GODREJPROP","LODHA","DLF","OBEROIRLTY","PHOENIXLTD","PRESTIGE","BRIGADE",
-    "SOBHA","MAHINDCIE","SWARAJENG","ESCORTS","FORCEMOT","VSTIND","MAHLOG",
-    "GESHIP","SCI","CONCOR","BLUEDART","GATI","MAHINDRA","MINDTREE","LTIM",
-    "OFSS","RATEGAIN","NAUKRI","JUSTDIAL","INDIAMART","MATRIMONY","MAKEMYTRIP",
-    "TANLA","ROUTE","HFCL","STLTECH","TATACOMM","RAILTEL","NBCC","BEML",
-    "BEL","HAL","MIDHANI","MTAR","PARAS","LAXMIMACH","GRINDWELL","ELGIEQUIP",
-    "THERMAX","BHEL","ABB","VOLTAS","BLUESTARCO","WHIRLPOOL","SYMPHONY","CROMPTON"
+    "IDFCFIRSTB","BANDHANBNK","MUTHOOTFIN","CHOLAFIN","BAJAJHLDNG","SBICARD"
 ]
 
-CRYPTO_PAIRS = [
-    "BTC-USD","ETH-USD","SOL-USD","BNB-USD","XRP-USD",
-    "ADA-USD","AVAX-USD","DOGE-USD","DOT-USD"
-]
+CRYPTO_PAIRS = ["BTC-USD","ETH-USD","SOL-USD","BNB-USD","XRP-USD","ADA-USD","DOGE-USD"]
 
 # ==========================================
-# 📡 TELEGRAM API UTILITIES
+# 📡 TELEGRAM UTILS
 # ==========================================
 def send_message(chat_id, message, reply_markup=None):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        'chat_id': chat_id,
-        'text': message,
-        'parse_mode': 'HTML'
-    }
-    if reply_markup:
-        payload['reply_markup'] = reply_markup
+    payload = {'chat_id': chat_id, 'text': message, 'parse_mode': 'HTML'}
+    if reply_markup: payload['reply_markup'] = reply_markup
     try:
-        response = requests.post(url, json=payload, timeout=10)
-        return response.json()
+        res = requests.post(url, json=payload, timeout=10)
+        return res.json()
     except Exception as e:
-        print(f"Telegram send_message error: {e}")
+        print(f"TG Error: {e}")
         return None
 
 def send_document(chat_id, document_path, caption=""):
@@ -127,77 +91,39 @@ def send_document(chat_id, document_path, caption=""):
         with open(document_path, 'rb') as doc:
             files = {'document': doc}
             data = {'chat_id': chat_id, 'caption': caption}
-            response = requests.post(url, data=data, files=files, timeout=20)
-            return response.json()
+            res = requests.post(url, data=data, files=files, timeout=20)
+            return res.json()
     except Exception as e:
-        print(f"Telegram send_document error: {e}")
+        print(f"TG Doc Error: {e}")
         return None
 
-def check_channel_membership(user_id):
-    if is_admin(user_id):
-        return True
-        
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getChatMember"
-    params = {
-        'chat_id': FORCE_CHANNEL_ID,
-        'user_id': user_id
-    }
-    try:
-        response = requests.get(url, params=params, timeout=10).json()
-        if response.get('ok'):
-            status = response['result']['status']
-            if status in ['member', 'administrator', 'creator']:
-                return True
-    except Exception as e:
-        print(f"Membership check error: {e}")
-        return True 
-    return False
-
 # ==========================================
-# 🔐 AUTHENTICATION & KEYBOARDS
+# 🔐 AUTH & PAGINATED KEYBOARDS
 # ==========================================
 def is_admin(chat_id):
-    return chat_id in ADMIN_IDS
+    user = bot_users.get(str(chat_id), {})
+    return user.get('is_admin', False)
 
-def is_banned(chat_id):
-    chat_id_str = str(chat_id)
-    if chat_id_str in bot_users:
-        return bot_users[chat_id_str].get('is_banned', False)
+def is_vip(chat_id):
+    user = bot_users.get(str(chat_id), {})
+    if is_admin(chat_id): return True # Admin is always VIP
+    if not user.get('is_vip', False): return False
+    # Check expiry
+    expiry_str = user.get('vip_expiry')
+    if not expiry_str: return True # Lifetime VIP
+    try:
+        expiry = datetime.strptime(expiry_str, "%d-%m-%Y %H:%M")
+        return datetime.now() < expiry
+    except: return False
+
+def check_channel_membership(user_id):
+    if is_admin(user_id): return True
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getChatMember"
+    try:
+        res = requests.get(url, params={'chat_id': FORCE_CHANNEL_ID, 'user_id': user_id}, timeout=10).json()
+        if res.get('ok') and res['result']['status'] in ['member', 'administrator', 'creator']: return True
+    except: return True 
     return False
-
-def get_force_join_keyboard():
-    return {
-        "inline_keyboard": [
-            [{"text": "📢 Join Our Channel First", "url": FORCE_CHANNEL_LINK}],
-            [{"text": "✅ I Have Joined", "callback_data": "check_join"}]
-        ]
-    }
-
-def get_user_keyboard():
-    return {
-        'keyboard': [
-            [{'text': '📊 Price Check'},    {'text': '🔥 All Active Stocks'}],
-            [{'text': '📈 All BUY Stocks'}, {'text': '📉 All SELL Stocks'}],
-            [{'text': '📋 Aaj Ke Alerts'},  {'text': '⏮ Last Alert'}],
-            [{'text': '🏆 Top Gainers'},     {'text': '💀 Top Losers'}],
-            [{'text': '❓ Help'}]
-        ],
-        'resize_keyboard': True,
-        'persistent': True
-    }
-
-def get_admin_keyboard():
-    return {
-        'keyboard': [
-            [{'text': '🛠 Admin Panel'},    {'text': '🔍 Force Scan'}],
-            [{'text': '📢 Broadcast'},      {'text': '💾 Backup DB'}],
-            [{'text': '⏸ Pause Bot'},       {'text': '▶️ Resume Bot'}],
-            [{'text': '👥 All Users'},       {'text': '✅ Bot Status'}],
-            [{'text': '📊 Price Check'},    {'text': '🔥 Active Stocks'}],
-        ],
-        'resize_keyboard': True,
-        'persistent': True
-    }
 
 def register_user(chat_id, first_name, username):
     chat_id_str = str(chat_id)
@@ -208,517 +134,372 @@ def register_user(chat_id, first_name, username):
             'username': username,
             'join_date': now,
             'interactions': 1,
-            'is_banned': False
+            'is_banned': False,
+            'is_admin': False,
+            'is_vip': False,
+            'watchlist': []
         }
         save_users(bot_users)
-        for admin in ADMIN_IDS:
-            send_message(admin, f"🚨 <b>New User Registered!</b>\n\n👤 Name: {first_name}\n🔗 Username: @{username}\n🆔 ID: <code>{chat_id}</code>")
+        # Notify admins about new user
+        for uid, data in bot_users.items():
+            if data.get('is_admin'):
+                send_message(uid, f"🚨 <b>New User!</b>\n👤 {first_name}\n🆔 <code>{chat_id}</code>")
     else:
         bot_users[chat_id_str]['interactions'] = bot_users[chat_id_str].get('interactions', 0) + 1
         save_users(bot_users)
 
+# --- KEYBOARDS ---
+def get_main_keyboard(chat_id):
+    """Main clean keyboard"""
+    kb = [
+        [{'text': '📊 Price Check'}, {'text': '🔥 Active Stocks'}],
+        [{'text': '📈 BUY Stocks'}, {'text': '📉 SELL Stocks'}],
+        [{'text': '⭐ My Watchlist'}],
+    ]
+    # Admin gets Admin Menu, Normal gets More Options
+    if is_admin(chat_id):
+        kb.append([{'text': '➡️ More Options'}, {'text': '👑 Admin Menu'}])
+    else:
+        kb.append([{'text': '➡️ More Options'}])
+    return {'keyboard': kb, 'resize_keyboard': True, 'persistent': True}
+
+def get_more_options_keyboard():
+    """Page 2 for normal users"""
+    return {
+        'keyboard': [
+            [{'text': '📋 Aaj Ke Alerts'}, {'text': '⏮ Last Alert'}],
+            [{'text': '🏆 Top Gainers'}, {'text': '💀 Top Losers'}],
+            [{'text': '💎 Upgrade VIP'}, {'text': '⬅️ Back to Main'}]
+        ], 'resize_keyboard': True
+    }
+
+def get_admin_menu_keyboard():
+    """Admin specific tools"""
+    return {
+        'keyboard': [
+            [{'text': '🛠 Admin Panel'}, {'text': '🔍 Force Scan'}],
+            [{'text': '📢 Broadcast'}, {'text': '💾 Excel Backup'}],
+            [{'text': '👥 All Users'}, {'text': '⏸ Pause / ▶️ Resume'}],
+            [{'text': '⬅️ Back to Main'}]
+        ], 'resize_keyboard': True
+    }
+
+def get_force_join_keyboard():
+    return {"inline_keyboard": [[{"text": "📢 Join Our Channel First", "url": FORCE_CHANNEL_LINK}], [{"text": "✅ I Have Joined", "callback_data": "check_join"}]]}
+
 # ==========================================
-# 🧮 MARKET ANALYSIS ALGORITHMS
+# 🧮 MARKET ANALYSIS
 # ==========================================
 def calculate_ema(prices, period):
     prices = np.array(prices, dtype=float)
     k = 2.0 / (period + 1)
     ema = [prices[0]]
-    for p in prices[1:]:
-        ema.append(p * k + ema[-1] * (1 - k))
+    for p in prices[1:]: ema.append(p * k + ema[-1] * (1 - k))
     return ema
 
 def calculate_rsi(prices, period=14):
     prices = np.array(prices, dtype=float)
     deltas = np.diff(prices)
-    gains  = np.where(deltas > 0, deltas, 0)
+    gains = np.where(deltas > 0, deltas, 0)
     losses = np.where(deltas < 0, -deltas, 0)
     avg_gain = np.mean(gains[:period])
     avg_loss = np.mean(losses[:period])
-    if avg_loss == 0:
-        return 100
-    rs  = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return round(rsi, 2)
+    if avg_loss == 0: return 100
+    return round(100 - (100 / (1 + (avg_gain / avg_loss))), 2)
 
 def check_stock(symbol, is_crypto=False):
     try:
         ticker_sym = symbol if is_crypto else symbol + ".NS"
-        ticker     = yf.Ticker(ticker_sym)
-        hist       = ticker.history(period="3mo", interval="1d")
-
-        if hist.empty or len(hist) < 25:
-            return None
-
+        hist = yf.Ticker(ticker_sym).history(period="3mo", interval="1d")
+        if hist.empty or len(hist) < 25: return None
         closes = hist['Close'].tolist()
+        ema9, ema21, rsi = calculate_ema(closes, 9), calculate_ema(closes, 21), calculate_rsi(closes[-15:])
+        
+        buy_sig = (not ema9[-2] > ema21[-2]) and (ema9[-1] > ema21[-1]) and rsi < 70
+        sell_sig = (ema9[-2] > ema21[-2]) and (not ema9[-1] > ema21[-1]) and rsi > 30
+        price = round(closes[-1], 2)
 
-        ema9  = calculate_ema(closes, 9)
-        ema21 = calculate_ema(closes, 21)
-        rsi   = calculate_rsi(closes[-15:])
-
-        prev_ema9_gt  = ema9[-2]  > ema21[-2]
-        curr_ema9_gt  = ema9[-1]  > ema21[-1]
-
-        buy_signal  = (not prev_ema9_gt) and curr_ema9_gt  and rsi < 70
-        sell_signal = prev_ema9_gt       and (not curr_ema9_gt) and rsi > 30
-
-        current_price = round(closes[-1], 2)
-
-        if buy_signal:
-            return {'ticker': symbol, 'price': str(current_price), 'action': 'BUY',  'timeframe': '1D', 'rsi': str(rsi), 'strategy': 'EMA9x21+RSI'}
-        elif sell_signal:
-            return {'ticker': symbol, 'price': str(current_price), 'action': 'SELL', 'timeframe': '1D', 'rsi': str(rsi), 'strategy': 'EMA9x21+RSI'}
-
+        if buy_sig: return {'ticker': symbol, 'price': str(price), 'action': 'BUY', 'rsi': str(rsi)}
+        elif sell_sig: return {'ticker': symbol, 'price': str(price), 'action': 'SELL', 'rsi': str(rsi)}
         return None
-    except Exception as e:
-        return None
-
-def format_alert_message(data):
-    now    = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%d-%m-%Y %H:%M:%S")
-    action = data.get('action', '').upper()
-    if action == 'BUY':
-        emoji       = '🟢'
-        action_text = '📈 BUY SIGNAL'
-    elif action == 'SELL':
-        emoji       = '🔴'
-        action_text = '📉 SELL SIGNAL'
-    else:
-        emoji       = '🔔'
-        action_text = '⚡ ALERT'
-    return (
-        f"{emoji} <b>{action_text}</b> {emoji}\n\n"
-        f"📊 <b>Stock:</b>     {data.get('ticker', 'N/A')}\n"
-        f"💰 <b>Price:</b>     ₹{data.get('price', 'N/A')}\n"
-        f"⚡ <b>Action:</b>    {action}\n"
-        f"📊 <b>RSI:</b>       {data.get('rsi', 'N/A')}\n"
-        f"⏰ <b>Timeframe:</b> {data.get('timeframe', 'N/A')}\n"
-        f"📝 <b>Strategy:</b>  {data.get('strategy', 'N/A')}\n"
-        f"🕐 <b>Time:</b>      {now}"
-    )
+    except: return None
 
 def scan_all_stocks(triggered_by=None):
-    if bot_settings['is_paused'] and not triggered_by:
-        return
-
-    # Triggered_by hai to usko jayega warna Default Channel pe
+    if bot_settings['is_paused'] and not triggered_by: return
     notify_chat = triggered_by if triggered_by else TELEGRAM_CHAT_ID
     
-    if triggered_by:
-        send_message(notify_chat, "🔍 <b>Force Scanning shuru hua...</b>\nसभी मार्केट्स चेक हो रहे हैं।")
-    else:
-        send_message(notify_chat, "🔍 <b>Auto Scanning shuru hua...</b>\nसभी मार्केट्स चेक हो रहे हैं।")
+    if triggered_by: send_message(notify_chat, "🔍 <b>Scanning started...</b>")
+    
+    buys, sells = [], []
+    for sym in NSE_STOCKS + CRYPTO_PAIRS:
+        is_cr = sym in CRYPTO_PAIRS
+        res = check_stock(sym, is_cr)
+        if res:
+            res['time'] = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M')
+            alerts_today.append(res)
+            stocks_data[sym] = res
+            if res['action'] == 'BUY': buys.append(res)
+            else: sells.append(res)
+        time.sleep(0.1)
 
-    buy_signals  = []
-    sell_signals = []
-    total        = len(NSE_STOCKS) + len(CRYPTO_PAIRS)
-    done         = 0
-
-    for symbol in NSE_STOCKS:
-        result = check_stock(symbol, is_crypto=False)
-        if result:
-            result['time'] = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M')
-            alerts_today.append(result)
-            stocks_data[symbol] = result
-            if result['action'] == 'BUY': buy_signals.append(result)
-            else: sell_signals.append(result)
-        done += 1
-        time.sleep(0.2)  
-
-    for symbol in CRYPTO_PAIRS:
-        result = check_stock(symbol, is_crypto=True)
-        if result:
-            result['time'] = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M')
-            alerts_today.append(result)
-            stocks_data[symbol] = result
-            if result['action'] == 'BUY': buy_signals.append(result)
-            else: sell_signals.append(result)
-        done += 1
-        time.sleep(0.2)
-
-    summary = (
-        f"✅ <b>Scan Complete!</b>\n\n"
-        f"📊 Total Checked: {total}\n"
-        f"📈 BUY Signals:  {len(buy_signals)}\n"
-        f"📉 SELL Signals: {len(sell_signals)}\n"
-        f"🕐 Time: {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%d-%m-%Y %H:%M')}\n\n"
-    )
-
-    if buy_signals:
-        summary += "🟢 <b>BUY Stocks:</b>\n"
-        for s in buy_signals: summary += f"📈 <b>{s['ticker']}</b> @ ₹{s['price']} | RSI: {s['rsi']}\n"
-        summary += "\n"
-
-    if sell_signals:
-        summary += "🔴 <b>SELL Stocks:</b>\n"
-        for s in sell_signals: summary += f"📉 <b>{s['ticker']}</b> @ ₹{s['price']} | RSI: {s['rsi']}\n"
-
-    if not buy_signals and not sell_signals:
-        summary += "😴 कोई नया सिग्नल नहीं मिला।"
+    summary = f"✅ <b>Scan Complete!</b>\n\n📈 BUY: {len(buys)}\n📉 SELL: {len(sells)}\n🕐 Time: {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M')}\n\n"
+    for s in buys: summary += f"🟢 <b>{s['ticker']}</b> @ ₹{s['price']} | RSI: {s['rsi']}\n"
+    for s in sells: summary += f"🔴 <b>{s['ticker']}</b> @ ₹{s['price']} | RSI: {s['rsi']}\n"
 
     if len(summary) > 4000:
-        chunks = [summary[i:i+4000] for i in range(0, len(summary), 4000)]
-        for chunk in chunks: send_message(notify_chat, chunk)
-    else:
-        send_message(notify_chat, summary)
+        for chunk in [summary[i:i+4000] for i in range(0, len(summary), 4000)]: send_message(notify_chat, chunk)
+    else: send_message(notify_chat, summary)
 
 def auto_scan_loop():
-    IST = pytz.timezone('Asia/Kolkata')
     while True:
         try:
             if not bot_settings['is_paused']:
-                now = datetime.now(IST)
-                # Weekday + Time check
-                if now.weekday() < 5 and 9 <= now.hour <= 16:
-                    scan_all_stocks()
-                else:
-                    # Crypto 24/7
-                    scan_all_stocks()
+                now = datetime.now(pytz.timezone('Asia/Kolkata'))
+                if now.weekday() < 5 and 9 <= now.hour <= 16: scan_all_stocks()
+                else: scan_all_stocks()
             time.sleep(3600)  
-        except Exception as e:
-            time.sleep(60)
+        except: time.sleep(60)
 
 # ==========================================
-# 👑 SUPER ADMIN COMMAND HANDLERS
+# 👑 ADMIN COMMANDS
 # ==========================================
-def handle_admin_panel(chat_id):
-    total_users = len(bot_users)
-    banned_users = sum(1 for u in bot_users.values() if u.get('is_banned', False))
-    status_emoji = "⏸ PAUSED" if bot_settings['is_paused'] else "▶️ RUNNING"
-    
-    message = (
-        f"👑 <b>SUPER ADMIN PANEL</b> 👑\n\n"
-        f"🤖 <b>Bot Status:</b> {status_emoji}\n"
-        f"👥 <b>Total Users:</b> {total_users}\n"
-        f"🚫 <b>Banned Users:</b> {banned_users}\n"
-        f"🔥 <b>Active Stocks:</b> {len(stocks_data)}\n"
-        f"🔔 <b>Today Alerts:</b> {len(alerts_today)}\n\n"
-        f"<b>🛠️ Manual Admin Commands:</b>\n"
-        f"<code>/ban [user_id]</code> - किसी को बैन करें\n"
-        f"<code>/unban [user_id]</code> - किसी को अनबैन करें\n"
-    )
-    send_message(chat_id, message)
+def export_excel_backup(chat_id):
+    try:
+        # Save JSON
+        send_document(chat_id, USERS_DB_FILE, caption="📁 <b>JSON Database Backup</b>")
+        
+        # Convert to Excel (CSV)
+        df = pd.DataFrame.from_dict(bot_users, orient='index')
+        csv_file = 'users_backup.csv'
+        df.to_csv(csv_file)
+        send_document(chat_id, csv_file, caption="📊 <b>Excel/CSV Database Backup</b>")
+    except Exception as e:
+        send_message(chat_id, f"❌ Backup Failed: {e}")
 
-def handle_broadcast_init(chat_id):
-    user_states[chat_id] = 'WAITING_FOR_BROADCAST'
-    send_message(chat_id, "📢 <b>Broadcast Mode Active:</b>\n\nकृपया वह मैसेज टाइप करें जो आप सभी यूज़र्स को भेजना चाहते हैं।\n\n(इसे कैंसिल करने के लिए 'cancel' टाइप करें)")
-
-def execute_broadcast(admin_chat_id, text):
+def handle_broadcast(chat_id, text):
     if text.lower() == 'cancel':
-        user_states.pop(admin_chat_id, None)
-        send_message(admin_chat_id, "✅ ब्रॉडकास्ट कैंसिल कर दिया गया है।")
+        user_states.pop(chat_id, None)
+        send_message(chat_id, "✅ Broadcast cancelled.")
         return
-
-    send_message(admin_chat_id, "⏳ ब्रॉडकास्ट शुरू हो रहा है... कृपया प्रतीक्षा करें।")
-    success = 0
-    failed = 0
-    broadcast_msg = f"🔔 <b>Admin Update:</b>\n\n{text}"
-    
+    send_message(chat_id, "⏳ Sending broadcast...")
+    success, failed = 0, 0
+    msg = f"🔔 <b>Important Update:</b>\n\n{text}"
     for uid, data in bot_users.items():
-        if not data.get('is_banned', False):
-            res = send_message(uid, broadcast_msg)
-            if res and res.get('ok'): success += 1
+        if not data.get('is_banned'):
+            if send_message(uid, msg): success += 1
             else: failed += 1
             time.sleep(0.05)
-
-    user_states.pop(admin_chat_id, None)
-    send_message(admin_chat_id, f"✅ <b>Broadcast Complete!</b>\n\n📨 Successfully sent: {success}\n❌ Failed: {failed}")
-
-def handle_ban_unban(chat_id, text, action):
-    parts = text.split()
-    if len(parts) < 2:
-        send_message(chat_id, f"⚠️ सही फॉर्मेट का उपयोग करें: <code>/{action} 123456789</code>")
-        return
-    
-    target_id = parts[1]
-    if target_id not in bot_users:
-        send_message(chat_id, "❌ यह यूज़र डेटाबेस में नहीं मिला।")
-        return
-        
-    if action == 'ban':
-        bot_users[target_id]['is_banned'] = True
-        send_message(chat_id, f"🚫 यूज़र <code>{target_id}</code> को सफलतापूर्ण बैन कर दिया गया है।")
-        send_message(target_id, "🚫 <b>ACCOUNT BANNED</b>\n\nआपको एडमिन द्वारा बैन कर दिया गया है।", reply_markup={"remove_keyboard": True})
-    else:
-        bot_users[target_id]['is_banned'] = False
-        send_message(chat_id, f"✅ यूज़र <code>{target_id}</code> को सफलतापूर्ण अनबैन कर दिया गया है।")
-        send_message(target_id, "✅ आपका अकाउंट अनबैन कर दिया गया है।", reply_markup=get_user_keyboard())
-    save_users(bot_users)
+    user_states.pop(chat_id, None)
+    send_message(chat_id, f"✅ <b>Broadcast Complete!</b>\nSent: {success} | Failed: {failed}")
 
 # ==========================================
-# 👤 GENERAL COMMAND HANDLERS
+# 👤 USER COMMANDS & BUTTONS
 # ==========================================
-def handle_start(chat_id, first_name, username):
-    admin_status = "👑 <b>Super Admin Access Granted</b>" if is_admin(chat_id) else "👤 <b>User Mode Active</b>"
-    message = (
-        f"🤖 <b>नमस्ते {first_name}! Black Devil Trading Bot में आपका स्वागत है।</b>\n\n"
-        f"{admin_status}\n\n"
-        f"मैं लाइव मार्केट में NSE + Crypto स्कैन करता हूँ!\n\n"
-        f"<b>Commands:</b>\n"
-        f"/price RELIANCE — लाइव प्राइस चेक करें\n"
-        f"/allstocks — एक्टिव स्टॉक्स की लिस्ट\n"
-        f"/buy — BUY सिग्नल्स देखें\n"
-        f"/sell — SELL सिग्नल्स देखें\n"
-        f"/gainers — टॉप गेनर्स\n"
-        f"/alerts — आज के सभी अलर्ट्स\n\n"
-        f"<i>👇 नीचे दिए गए बटन्स का उपयोग करें!</i>"
-    )
-    keyboard = get_admin_keyboard() if is_admin(chat_id) else get_user_keyboard()
-    send_message(chat_id, message, reply_markup=keyboard)
-
-def handle_users_list(chat_id):
-    if not bot_users:
-        send_message(chat_id, "👥 अभी तक कोई यूज़र रजिस्टर नहीं हुआ है।")
-        return
-    message = f"👥 <b>Registered Users ({len(bot_users)}):</b>\n\n"
-    for uid, data in bot_users.items():
-        name = data.get('first_name', 'Unknown')
-        uname = data.get('username', 'None')
-        banned = "🚫 BANNED" if data.get('is_banned', False) else "✅ ACTIVE"
-        message += f"👤 <b>{name}</b> (@{uname})\n🆔 <code>{uid}</code>\nСтатус: {banned}\n\n"
-        
-    if len(message) > 4000:
-        chunks = [message[i:i+4000] for i in range(0, len(message), 4000)]
-        for chunk in chunks: send_message(chat_id, chunk)
-    else:
-        send_message(chat_id, message)
-
 def handle_price(chat_id, text):
     parts = text.strip().split()
-    if len(parts) < 2:
-        send_message(chat_id, "⚠️ स्टॉक का सिंबल बताएं!\n\nExample: <code>/price RELIANCE</code>")
-        return
-    symbol = parts[1].upper()
-    send_message(chat_id, f"🔍 <b>{symbol}</b> का प्राइस फेच हो रहा है...")
+    if len(parts) < 2: return send_message(chat_id, "⚠️ Format: <code>/price RELIANCE</code>")
+    sym = parts[1].upper()
     try:
-        ticker = yf.Ticker(symbol + ".NS")
-        info   = ticker.history(period="5d", interval="1m")
-        if info.empty:
-            ticker = yf.Ticker(symbol)
-            info   = ticker.history(period="5d", interval="1m")
-        
-        if not info.empty and len(info) >= 2:
-            price      = round(info['Close'].iloc[-1], 2)
-            prev_close = round(info['Close'].iloc[-2],  2)
-            change     = round(price - prev_close, 2)
-            change_pct = round((change / prev_close) * 100, 2) if prev_close else 0
-            trend      = "📈" if change >= 0 else "📉"
-            sign       = "+" if change >= 0 else ""
-            msg = (
-                f"{trend} <b>{symbol}</b>\n\n"
-                f"💰 <b>Price:</b>  ₹{price}\n"
-                f"📊 <b>Change:</b> {sign}{change} ({sign}{change_pct}%)\n"
-                f"🕐 <b>Time:</b>   {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%d-%m-%Y %H:%M')}"
-            )
-            send_message(chat_id, msg)
-        else:
-            send_message(chat_id, f"❌ <b>{symbol}</b> का डेटा नहीं मिला!")
-    except Exception as e:
-        send_message(chat_id, f"❌ Error: {str(e)}")
+        hist = yf.Ticker(sym + ".NS").history(period="2d", interval="1d")
+        if hist.empty: hist = yf.Ticker(sym).history(period="2d", interval="1d")
+        if not hist.empty and len(hist) >= 2:
+            pr = round(hist['Close'].iloc[-1], 2)
+            pc = round(hist['Close'].iloc[-2], 2)
+            ch = round(pr - pc, 2)
+            cp = round((ch / pc) * 100, 2)
+            tr, sg = ("📈", "+") if ch >= 0 else ("📉", "")
+            send_message(chat_id, f"{tr} <b>{sym}</b>\n💰 Price: ₹{pr}\n📊 Change: {sg}{ch} ({sg}{cp}%)")
+        else: send_message(chat_id, f"❌ Data not found for {sym}")
+    except: send_message(chat_id, f"❌ Error fetching {sym}")
 
-def handle_allstocks(chat_id, filter_action=None):
-    if not stocks_data:
-        send_message(chat_id, "🔥 कोई एक्टिव स्टॉक नहीं है। मार्केट कंडीशन न्यूट्रल हैं।")
-        return
-    if filter_action:
-        filtered = {k: v for k, v in stocks_data.items() if v.get('action','').upper() == filter_action.upper()}
-        emoji    = '📈' if filter_action == 'BUY' else '📉'
-        title    = f"{emoji} <b>{filter_action} Stocks ({len(filtered)}):</b>\n\n"
-    else:
-        filtered = stocks_data
-        title    = f"🔥 <b>Active Stocks ({len(filtered)}):</b>\n\n"
-
-    if not filtered:
-        send_message(chat_id, f"❌ कोई {filter_action} स्टॉक नहीं मिला।")
-        return
-
-    message = title
-    count   = 0
-    msgs    = []
-    for ticker, data in filtered.items():
-        action  = data.get('action','N/A').upper()
-        price   = data.get('price','N/A')
-        rsi     = data.get('rsi','N/A')
-        t       = data.get('time','N/A')
-        em      = '🟢' if action == 'BUY' else '🔴'
-        message += f"{em} <b>{ticker}</b> @ ₹{price} | RSI:{rsi} | {t}\n"
-        count   += 1
-        if count % 30 == 0:
-            msgs.append(message)
-            message = "<b>...continued:</b>\n\n"
-    if message.strip():
-        msgs.append(message)
-    for m in msgs: send_message(chat_id, m)
-
-def handle_gainers_losers(chat_id, mode='gainers'):
-    send_message(chat_id, "📡 डेटा फेच हो रहा है... थोड़ा इंतज़ार करें!")
-    try:
-        results = []
-        check_list = NSE_STOCKS[:30]
-        for symbol in check_list:
-            try:
-                ticker = yf.Ticker(symbol + ".NS")
-                hist   = ticker.history(period="2d", interval="1d")
-                if len(hist) >= 2:
-                    prev  = hist['Close'].iloc[-2]
-                    curr  = hist['Close'].iloc[-1]
-                    chng  = round(((curr - prev) / prev) * 100, 2) if prev else 0
-                    results.append((symbol, round(curr, 2), chng))
-                time.sleep(0.1)
-            except:
-                pass
-
-        results.sort(key=lambda x: x[2], reverse=(mode == 'gainers'))
-        top   = results[:10]
-        title = "🏆 <b>Top Gainers:</b>\n\n" if mode == 'gainers' else "💀 <b>Top Losers:</b>\n\n"
-        msg   = title
-        for i, (sym, price, chng) in enumerate(top, 1):
-            sign = "+" if chng >= 0 else ""
-            em   = "📈" if chng >= 0 else "📉"
-            msg += f"{i}. {em} <b>{sym}</b> ₹{price} ({sign}{chng}%)\n"
-        send_message(chat_id, msg)
-    except Exception as e:
-        send_message(chat_id, f"❌ Error: {str(e)}")
-
-def handle_button(chat_id, text, first_name):
-    if chat_id in user_states and user_states[chat_id] == 'WAITING_FOR_BROADCAST':
-        execute_broadcast(chat_id, text)
-        return
-
-    if text == '📊 Price Check': send_message(chat_id, "📊 कौनसे स्टॉक का प्राइस चाहिए?\n\nलिखें: <code>/price RELIANCE</code>")
-    elif text in ['🔥 All Active Stocks', '🔥 Active Stocks']: handle_allstocks(chat_id)
-    elif text == '📈 All BUY Stocks': handle_allstocks(chat_id, filter_action='BUY')
-    elif text == '📉 All SELL Stocks': handle_allstocks(chat_id, filter_action='SELL')
-    elif text == '📋 Aaj Ke Alerts':
-        if not alerts_today: send_message(chat_id, "📋 आज अभी तक कोई अलर्ट नहीं आया।")
-        else:
-            msg = f"📋 <b>आज के अलर्ट्स ({len(alerts_today)}):</b>\n\n"
-            for al in alerts_today[-15:]:
-                em = '🟢' if al.get('action') == 'BUY' else '🔴'
-                msg += f"{em} <b>{al.get('ticker','?')}</b> — {al.get('action')} @ ₹{al.get('price','?')} | {al.get('time','')}\n"
-            send_message(chat_id, msg)
-    elif text == '⏮ Last Alert':
-        if alerts_today: send_message(chat_id, format_alert_message(alerts_today[-1]))
-        else: send_message(chat_id, "📋 कोई अलर्ट नहीं मिला।")
-    elif text == '🏆 Top Gainers': handle_gainers_losers(chat_id, mode='gainers')
-    elif text == '💀 Top Losers': handle_gainers_losers(chat_id, mode='losers')
+def handle_allstocks(chat_id, filter_act=None):
+    if not stocks_data: return send_message(chat_id, "🔥 Koi active stock nahi hai.")
+    filtered = {k: v for k, v in stocks_data.items() if (v['action'] == filter_act if filter_act else True)}
     
-    elif text == '🛠 Admin Panel':
-        if is_admin(chat_id): handle_admin_panel(chat_id)
-    elif text == '🔍 Force Scan':
-        if is_admin(chat_id):
-            send_message(chat_id, "🔍 Force Scan शुरू हो रहा है... 2-3 मिनट लगेंगे!")
-            threading.Thread(target=scan_all_stocks, args=(chat_id,)).start()
-    elif text == '👥 All Users':
-        if is_admin(chat_id): handle_users_list(chat_id)
-    elif text == '📢 Broadcast':
-        if is_admin(chat_id): handle_broadcast_init(chat_id)
-    elif text == '💾 Backup DB':
-        if is_admin(chat_id):
-            send_document(chat_id, USERS_DB_FILE, caption="💾 <b>बॉट का डेटाबेस बैकअप</b>")
-    elif text == '⏸ Pause Bot':
-        if is_admin(chat_id):
-            bot_settings['is_paused'] = True
-            send_message(chat_id, "⏸ <b>बॉट रोक दिया गया है।</b>\nअब कोई ऑटोमैटिक स्कैनिंग नहीं होगी।")
-    elif text == '▶️ Resume Bot':
-        if is_admin(chat_id):
-            bot_settings['is_paused'] = False
-            send_message(chat_id, "▶️ <b>बॉट फिर से चालू कर दिया गया है।</b>\nऑटोमैटिक स्कैनिंग फिर से शुरू हो गई है।")
-    elif text == '✅ Bot Status':
-        if is_admin(chat_id): handle_admin_panel(chat_id)
+    # --- VIP SYSTEM LOGIC ---
+    vip_status = is_vip(chat_id)
+    items = list(filtered.items())
+    
+    if not vip_status and len(items) > 3:
+        display_items = items[:3]
+        vip_msg = "\n\n🔒 <i>Remaining signals are hidden. Get VIP to see all!</i>"
     else:
-        keyboard = get_admin_keyboard() if is_admin(chat_id) else get_user_keyboard()
-        send_message(chat_id, "❓ कमांड समझ नहीं आई। मेनू का उपयोग करें!", reply_markup=keyboard)
+        display_items = items
+        vip_msg = ""
+
+    if not display_items: return send_message(chat_id, "❌ Koi stock nahi mila.")
+    
+    msg = f"🔥 <b>{filter_act or 'Active'} Stocks:</b>\n\n"
+    for t, d in display_items:
+        em = '🟢' if d['action'] == 'BUY' else '🔴'
+        msg += f"{em} <b>{t}</b> @ ₹{d['price']} | RSI:{d['rsi']}\n"
+    
+    send_message(chat_id, msg + vip_msg)
+
+def handle_watchlist(chat_id, text):
+    parts = text.split()
+    uid = str(chat_id)
+    wl = bot_users[uid].get('watchlist', [])
+    
+    if text == '⭐ My Watchlist' or text == '/watchlist':
+        if not wl: return send_message(chat_id, "⭐ Aapki watchlist khali hai.\nAdd karein: <code>/add RELIANCE</code>")
+        msg = "⭐ <b>Your Watchlist Live Status:</b>\n\n"
+        for sym in wl:
+            data = stocks_data.get(sym)
+            if data:
+                em = '🟢' if data['action'] == 'BUY' else '🔴'
+                msg += f"{em} <b>{sym}</b>: {data['action']} @ ₹{data['price']}\n"
+            else:
+                msg += f"⚪ <b>{sym}</b>: Neutral (No Signal)\n"
+        msg += "\n<i>Remove karne ke liye: /remove SYMBOL</i>"
+        send_message(chat_id, msg)
+        
+    elif text.startswith('/add '):
+        if len(parts) < 2: return
+        sym = parts[1].upper()
+        if sym not in wl: 
+            wl.append(sym)
+            bot_users[uid]['watchlist'] = wl
+            save_users(bot_users)
+            send_message(chat_id, f"✅ <b>{sym}</b> added to watchlist!")
+        else: send_message(chat_id, "⚠️ Pehle se added hai.")
+        
+    elif text.startswith('/remove '):
+        if len(parts) < 2: return
+        sym = parts[1].upper()
+        if sym in wl:
+            wl.remove(sym)
+            bot_users[uid]['watchlist'] = wl
+            save_users(bot_users)
+            send_message(chat_id, f"🗑 <b>{sym}</b> removed.")
+
+def handle_button(chat_id, text):
+    if chat_id in user_states and user_states[chat_id] == 'WAITING_FOR_BROADCAST':
+        return handle_broadcast(chat_id, text)
+
+    # --- Pagination & Navigation ---
+    if text == '⬅️ Back to Main':
+        send_message(chat_id, "🏠 Main Menu", reply_markup=get_main_keyboard(chat_id))
+    elif text == '➡️ More Options':
+        send_message(chat_id, "📂 More Options", reply_markup=get_more_options_keyboard())
+    elif text == '👑 Admin Menu':
+        if is_admin(chat_id): send_message(chat_id, "👑 Super Admin Tools", reply_markup=get_admin_menu_keyboard())
+
+    # --- Core Features ---
+    elif text == '📊 Price Check': send_message(chat_id, "📊 Kaunse stock ka price chahiye?\nLikho: <code>/price RELIANCE</code>")
+    elif text == '🔥 Active Stocks': handle_allstocks(chat_id)
+    elif text == '📈 BUY Stocks': handle_allstocks(chat_id, 'BUY')
+    elif text == '📉 SELL Stocks': handle_allstocks(chat_id, 'SELL')
+    elif text == '⭐ My Watchlist': handle_watchlist(chat_id, text)
+    
+    # --- Page 2 Features ---
+    elif text == '📋 Aaj Ke Alerts':
+        if not alerts_today: return send_message(chat_id, "📋 Aaj koi alert nahi aaya.")
+        msg = "📋 <b>Aaj Ke Alerts:</b>\n\n"
+        for al in alerts_today[-10:]:
+            em = '🟢' if al['action'] == 'BUY' else '🔴'
+            msg += f"{em} <b>{al.get('ticker')}</b> — {al['action']} @ ₹{al['price']}\n"
+        send_message(chat_id, msg)
+    elif text == '💎 Upgrade VIP':
+        send_message(chat_id, "💎 <b>VIP Membership</b>\n\nVIP lene ke liye Admin ko contact karein. Isme aapko milenge:\n✅ Unlimited Live Signals\n✅ Full Active Stocks List\n✅ Zero Delay")
+    
+    # --- Admin Features ---
+    elif text == '🛠 Admin Panel':
+        if is_admin(chat_id): send_message(chat_id, f"👑 <b>Panel</b>\nUsers: {len(bot_users)}\nActive Stocks: {len(stocks_data)}\nVIPs: {sum(1 for u in bot_users.values() if u.get('is_vip'))}")
+    elif text == '🔍 Force Scan':
+        if is_admin(chat_id): threading.Thread(target=scan_all_stocks, args=(chat_id,)).start()
+    elif text == '📢 Broadcast':
+        if is_admin(chat_id):
+            user_states[chat_id] = 'WAITING_FOR_BROADCAST'
+            send_message(chat_id, "📢 Message type karein (cancel ke liye 'cancel' likhein):")
+    elif text == '💾 Excel Backup':
+        if is_admin(chat_id): export_excel_backup(chat_id)
+    elif text == '⏸ Pause / ▶️ Resume':
+        if is_admin(chat_id):
+            bot_settings['is_paused'] = not bot_settings['is_paused']
+            st = "PAUSED ⏸" if bot_settings['is_paused'] else "RUNNING ▶️"
+            send_message(chat_id, f"Bot is now {st}")
+    elif text == '👥 All Users':
+        if is_admin(chat_id): send_message(chat_id, f"Total Registered: {len(bot_users)}\n<i>(Full detail ke liye Excel Backup lein)</i>")
 
 # ==========================================
 # 🌐 FLASK ROUTES
 # ==========================================
 @app.route('/')
-def home():
-    return jsonify({'status': '✅ Black Devil Super Bot Running!', 'users': len(bot_users)})
+def home(): return jsonify({'status': 'Running', 'users': len(bot_users)})
 
 @app.route('/telegram', methods=['POST'])
 def telegram_updates():
     try:
         update = request.get_json()
         
+        # Callbacks (Join Check)
         if 'callback_query' in update:
-            callback = update['callback_query']
-            chat_id = callback['message']['chat']['id']
-            message_id = callback['message']['message_id']
-            data = callback['data']
-            
-            if data == "check_join":
-                if check_channel_membership(chat_id):
-                    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteMessage", json={'chat_id': chat_id, 'message_id': message_id})
-                    send_message(chat_id, "🎉 <b>धन्यवाद! चैनल ज्वाइन करने के लिए।</b>\n\nबॉट अब अनलॉक हो गया है। शुरू करने के लिए /start टाइप करें।")
-                else:
-                    send_message(chat_id, "❌ <b>आपने अभी तक चैनल ज्वाइन नहीं किया है!</b>\n\nकृपया पहले ऊपर दिए गए लिंक से चैनल ज्वाइन करें और फिर 'I Have Joined' पर क्लिक करें।")
+            cb = update['callback_query']
+            cid = cb['message']['chat']['id']
+            if cb['data'] == "check_join":
+                if check_channel_membership(cid):
+                    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteMessage", json={'chat_id': cid, 'message_id': cb['message']['message_id']})
+                    send_message(cid, "🎉 <b>Verified!</b> Bot is unlocked.", reply_markup=get_main_keyboard(cid))
+                else: send_message(cid, "❌ Abhi tak join nahi kiya.")
             return jsonify({'status': 'ok'}), 200
 
-        if 'message' not in update:
-            return jsonify({'status': 'ok'}), 200
+        if 'message' not in update: return jsonify({'status': 'ok'}), 200
         
-        msg        = update['message']
-        chat_id    = msg['chat']['id']
-        text       = msg.get('text', '')
-        first_name = msg.get('from', {}).get('first_name', 'Friend')
-        username   = msg.get('from', {}).get('username', 'NoUsername')
+        msg = update['message']
+        chat_id = msg['chat']['id']
+        text = msg.get('text', '')
+        fname = msg.get('from', {}).get('first_name', 'User')
+        uname = msg.get('from', {}).get('username', 'None')
 
-        if is_banned(chat_id):
+        if str(chat_id) in bot_users and bot_users[str(chat_id)].get('is_banned'): return jsonify({'status': 'ok'})
+        register_user(chat_id, fname, uname)
+
+        # 🛑 SECRET ADMIN SWITCH 🛑
+        if text == "sonu@123":
+            bot_users[str(chat_id)]['is_admin'] = True
+            save_users(bot_users)
+            send_message(chat_id, "🔐 <b>Secret Password Accepted!</b>\n\nAap ab Super Admin hain. Niche <b>👑 Admin Menu</b> check karein.", reply_markup=get_main_keyboard(chat_id))
             return jsonify({'status': 'ok'}), 200
 
-        register_user(chat_id, first_name, username)
+        # Force Subscribe Check (Skipped for Admins)
+        if not check_channel_membership(chat_id):
+            send_message(chat_id, "⚠️ <b>Bot use karne ke liye channel join karein!</b>", reply_markup=get_force_join_keyboard())
+            return jsonify({'status': 'ok'}), 200
 
-        # 🛑 FORCE SUBSCRIBE CHECK 🛑
-        if not is_admin(chat_id):
-            is_member = check_channel_membership(chat_id)
-            if not is_member:
-                send_message(
-                    chat_id, 
-                    f"⚠️ <b>बॉट का उपयोग करने के लिए आपको हमारा चैनल ज्वाइन करना होगा!</b>\n\n👇 नीचे दिए गए बटन पर क्लिक करके चैनल ज्वाइन करें।", 
-                    reply_markup=get_force_join_keyboard()
-                )
-                return jsonify({'status': 'ok'}), 200
-
+        # Admin specific text commands
         if is_admin(chat_id):
-            if text.startswith('/ban '):
-                handle_ban_unban(chat_id, text, 'ban')
-                return jsonify({'status': 'ok'}), 200
-            elif text.startswith('/unban '):
-                handle_ban_unban(chat_id, text, 'unban')
-                return jsonify({'status': 'ok'}), 200
+            if text.startswith('/addvip '):
+                parts = text.split()
+                if len(parts) == 3:
+                    target, days = parts[1], int(parts[2])
+                    if target in bot_users:
+                        exp = datetime.now() + timedelta(days=days)
+                        bot_users[target]['is_vip'] = True
+                        bot_users[target]['vip_expiry'] = exp.strftime("%d-%m-%Y %H:%M")
+                        save_users(bot_users)
+                        send_message(chat_id, f"✅ VIP given to {target} for {days} days.")
+                        send_message(target, f"💎 <b>Congratulations!</b> You are now VIP for {days} days.")
+                return jsonify({'status': 'ok'})
 
-        if text.startswith('/start'):
-            handle_start(chat_id, first_name, username)
-        elif text.startswith('/price'):
-            handle_price(chat_id, text)
-        else:
-            handle_button(chat_id, text, first_name)
+        # Global text commands
+        if text.startswith('/start'): send_message(chat_id, f"🤖 Namaste {fname}!", reply_markup=get_main_keyboard(chat_id))
+        elif text.startswith('/price '): handle_price(chat_id, text)
+        elif text.startswith('/add ') or text.startswith('/remove ') or text == '/watchlist': handle_watchlist(chat_id, text)
+        else: handle_button(chat_id, text)
 
-        return jsonify({'status': 'ok'}), 200
+        return jsonify({'status': 'ok'})
     except Exception as e:
-        print(f"Error in telegram updates: {e}")
-        return jsonify({'status': 'error'}), 500
+        print(f"Update error: {e}")
+        return jsonify({'status': 'error'})
 
 @app.route('/set_webhook', methods=['GET'])
 def set_webhook():
-    render_url = request.args.get('url', '')
-    if not render_url:
-        return jsonify({'error': 'URL आवश्यक है'}), 400
-    webhook_url = f"{render_url}/telegram"
-    api_url     = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={webhook_url}"
-    response    = requests.get(api_url)
-    result      = response.json()
-    if result.get('ok'):
-        return jsonify({'status': '✅ Webhook Set!', 'url': webhook_url})
-    return jsonify({'status': '❌ Failed', 'error': result})
+    url = request.args.get('url', '')
+    res = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={url}/telegram")
+    return jsonify(res.json())
 
-# ==========================================
-# 🚀 INITIALIZATION
-# ==========================================
-scanner_thread = threading.Thread(target=auto_scan_loop)
-scanner_thread.daemon = True
-scanner_thread.start()
+threading.Thread(target=auto_scan_loop, daemon=True).start()
 
 if __name__ == '__main__':
     app.run(debug=False, host='0.0.0.0', port=5000)
