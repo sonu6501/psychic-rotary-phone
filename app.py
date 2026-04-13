@@ -14,6 +14,7 @@ app = Flask(__name__)
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+CHANNEL_LINK = "https://t.me/+vK7WE4K6T3U2ODc1"
 
 if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     print("⚠️ WARNING: Telegram Token ya Chat ID set nahi hai!")
@@ -73,6 +74,20 @@ def send_message(chat_id, message, reply_markup=None):
         print(f"Telegram error: {e}")
         return None
 
+# HTML-safe message chunker 4-5 page support ke liye
+def send_long_message(chat_id, text):
+    lines = text.split('\n')
+    msg = ""
+    for line in lines:
+        # Check if adding this line exceeds the 4000 char limit
+        if len(msg) + len(line) + 1 > 3900:
+            send_message(chat_id, msg)
+            msg = line + "\n"
+        else:
+            msg += line + "\n"
+    if msg.strip():
+        send_message(chat_id, msg)
+
 def get_main_keyboard():
     return {
         'keyboard': [
@@ -130,12 +145,15 @@ def check_stock(symbol, is_crypto=False):
 
         current_price = round(closes[-1], 2)
 
+        # Ab koi stock skip nahi hoga, sabhi ka data return hoga
         if buy_signal:
-            return {'ticker': symbol, 'price': str(current_price), 'action': 'BUY',  'timeframe': '1D', 'rsi': str(rsi), 'strategy': 'EMA9x21+RSI'}
+            action = 'BUY'
         elif sell_signal:
-            return {'ticker': symbol, 'price': str(current_price), 'action': 'SELL', 'timeframe': '1D', 'rsi': str(rsi), 'strategy': 'EMA9x21+RSI'}
+            action = 'SELL'
+        else:
+            action = 'NEUTRAL'
 
-        return None
+        return {'ticker': symbol, 'price': str(current_price), 'action': action,  'timeframe': '1D', 'rsi': str(rsi), 'strategy': 'EMA9x21+RSI'}
 
     except Exception as e:
         print(f"Error checking {symbol}: {e}")
@@ -151,8 +169,8 @@ def format_alert_message(data):
         emoji       = '🔴'
         action_text = '📉 SELL SIGNAL'
     else:
-        emoji       = '🔔'
-        action_text = '⚡ ALERT'
+        emoji       = '🔸'
+        action_text = '📊 STOCK UPDATE'
     return (
         f"{emoji} <b>{action_text}</b> {emoji}\n\n"
         f"📊 <b>Stock:</b>     {data.get('ticker', 'N/A')}\n"
@@ -178,12 +196,13 @@ def scan_all_stocks():
         result = check_stock(symbol, is_crypto=False)
         if result:
             result['time'] = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M')
-            alerts_today.append(result)
-            stocks_data[symbol] = result
+            stocks_data[symbol] = result # Sabhi stocks ko list me add karo
             if result['action'] == 'BUY':
                 buy_signals.append(result)
-            else:
+                alerts_today.append(result)
+            elif result['action'] == 'SELL':
                 sell_signals.append(result)
+                alerts_today.append(result)
         done += 1
         time.sleep(0.2)  # Rate limit avoid karo
 
@@ -192,12 +211,13 @@ def scan_all_stocks():
         result = check_stock(symbol, is_crypto=True)
         if result:
             result['time'] = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M')
-            alerts_today.append(result)
-            stocks_data[symbol] = result
+            stocks_data[symbol] = result # Sabhi stocks ko list me add karo
             if result['action'] == 'BUY':
                 buy_signals.append(result)
-            else:
+                alerts_today.append(result)
+            elif result['action'] == 'SELL':
                 sell_signals.append(result)
+                alerts_today.append(result)
         done += 1
         time.sleep(0.2)
 
@@ -207,7 +227,8 @@ def scan_all_stocks():
         f"📊 Total Checked: {total}\n"
         f"📈 BUY Signals:  {len(buy_signals)}\n"
         f"📉 SELL Signals: {len(sell_signals)}\n"
-        f"🕐 Time: {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%d-%m-%Y %H:%M')}\n\n"
+        f"🕐 Time: {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%d-%m-%Y %H:%M')}\n"
+        f"🔗 <b>Join Our Channel:</b> <a href='{CHANNEL_LINK}'>Click Here To Join</a>\n\n"
     )
 
     if buy_signals:
@@ -220,18 +241,19 @@ def scan_all_stocks():
         summary += "🔴 <b>SELL Stocks:</b>\n"
         for s in sell_signals:
             summary += f"📉 <b>{s['ticker']}</b> @ ₹{s['price']} | RSI: {s['rsi']}\n"
+        summary += "\n"
+
+    # Yaha saare stocks ki price list hogi taaki aap 4-5 pages me sab dekh sakein
+    summary += "📋 <b>Sare Scanned Stocks Ki Price List:</b>\n\n"
+    for ticker, data in stocks_data.items():
+        em = '🟢' if data['action'] == 'BUY' else '🔴' if data['action'] == 'SELL' else '🔸'
+        summary += f"{em} <b>{ticker}</b> : ₹{data['price']} | RSI: {data['rsi']}\n"
 
     if not buy_signals and not sell_signals:
-        summary += "😴 Koi signal nahi mila abhi."
+        summary += "\n😴 Koi naya BUY/SELL signal nahi mila abhi."
 
-    # Telegram 4096 char limit
-    if len(summary) > 4000:
-        chunks = [summary[i:i+4000] for i in range(0, len(summary), 4000)]
-        for chunk in chunks:
-            send_message(TELEGRAM_CHAT_ID, chunk)
-    else:
-        send_message(TELEGRAM_CHAT_ID, summary)
-
+    # Send using long message helper function (ye HTML tags ko nahi todega)
+    send_long_message(TELEGRAM_CHAT_ID, summary)
     print("✅ Scan complete!")
 
 def auto_scan_loop():
@@ -239,13 +261,13 @@ def auto_scan_loop():
     while True:
         try:
             now = datetime.now(IST)
-            # Weekdays 9am-4pm (9:00 to 16:59) scan karo har ghante
+            # Weekdays 9am-4pm (9:00 to 16:59) scan karo har 15 minute
             if now.weekday() < 5 and 9 <= now.hour <= 16:
                 scan_all_stocks()
             else:
                 # Crypto 24/7 scan ke liye abhi yahi call rakha hai
                 scan_all_stocks()
-            time.sleep(3600)  # 1 ghanta
+            time.sleep(900)  # 15 ghanta (900 Seconds = 15 Minutes)
         except Exception as e:
             print(f"Auto scan error: {e}")
             time.sleep(60)
@@ -257,7 +279,7 @@ def auto_scan_loop():
 def handle_start(chat_id, first_name):
     message = (
         f"🤖 <b>Namaste {first_name}! Black Devil Trading Bot</b>\n\n"
-        f"Main har ghante NSE + Crypto scan karta hoon!\n\n"
+        f"Main har 15 minute NSE + Crypto scan karta hoon!\n\n"
         f"<b>Commands:</b>\n"
         f"/scan — Abhi scan karo\n"
         f"/price RELIANCE — Live price\n"
@@ -268,6 +290,7 @@ def handle_start(chat_id, first_name):
         f"/losers — Top losers\n"
         f"/alerts — Aaj ke alerts\n"
         f"/status — Bot status\n\n"
+        f"🔗 <b>Join Our Channel:</b> <a href='{CHANNEL_LINK}'>Click Here</a>\n\n"
         f"<i>👇 Buttons se bhi use karo!</i>"
     )
     send_message(chat_id, message, reply_markup=get_main_keyboard())
@@ -285,6 +308,7 @@ def handle_help(chat_id):
         "📋 /alerts — Aaj ke alerts\n"
         "⏮ /last — Last alert\n"
         "✅ /status — Bot stats\n"
+        f"🔗 <b>Join Channel:</b> <a href='{CHANNEL_LINK}'>Click Here</a>\n"
     )
     send_message(chat_id, message, reply_markup=get_main_keyboard())
 
@@ -295,13 +319,13 @@ def handle_status(chat_id):
     message = (
         f"✅ <b>Bot Status: ACTIVE</b>\n\n"
         f"🟢 Server:  Running\n"
-        f"🟢 Scanner: Active (har ghante)\n"
+        f"🟢 Scanner: Active (har 15 minute)\n"
         f"🟢 Telegram: Connected\n\n"
         f"📊 <b>Aaj Ki Stats:</b>\n"
         f"🔔 Total Alerts:  {len(alerts_today)}\n"
         f"📈 BUY Signals:   {buy_count}\n"
         f"📉 SELL Signals:  {sell_count}\n"
-        f"🔥 Active Stocks: {len(stocks_data)}\n\n"
+        f"🔥 Scanned Stocks: {len(stocks_data)}\n\n"
         f"🕐 Time: {now}"
     )
     send_message(chat_id, message, reply_markup=get_main_keyboard())
@@ -341,7 +365,7 @@ def handle_price(chat_id, text):
 
 def handle_alerts(chat_id):
     if not alerts_today:
-        send_message(chat_id, "📋 Aaj abhi tak koi alert nahi aaya.\n\n/scan karo!")
+        send_message(chat_id, "📋 Aaj abhi tak koi BUY/SELL alert nahi aaya.\n\n/scan karo!")
         return
     message = f"📋 <b>Aaj Ke Alerts ({len(alerts_today)}):</b>\n\n"
     for alert in alerts_today[-15:]:
@@ -366,30 +390,23 @@ def handle_allstocks(chat_id, filter_action=None):
         title    = f"{emoji} <b>{filter_action} Stocks ({len(filtered)}):</b>\n\n"
     else:
         filtered = stocks_data
-        title    = f"🔥 <b>Active Stocks ({len(filtered)}):</b>\n\n"
+        title    = f"🔥 <b>All Scanned Stocks ({len(filtered)}):</b>\n\n"
 
     if not filtered:
         send_message(chat_id, f"❌ Koi {filter_action} stock nahi mila.\n\n/scan karo!")
         return
 
     message = title
-    count   = 0
-    msgs    = []
     for ticker, data in filtered.items():
         action  = data.get('action','N/A').upper()
         price   = data.get('price','N/A')
         rsi     = data.get('rsi','N/A')
         t       = data.get('time','N/A')
-        em      = '🟢' if action == 'BUY' else '🔴'
+        em      = '🟢' if action == 'BUY' else '🔴' if action == 'SELL' else '🔸'
         message += f"{em} <b>{ticker}</b> @ ₹{price} | RSI:{rsi} | {t}\n"
-        count   += 1
-        if count % 30 == 0:
-            msgs.append(message)
-            message = "<b>...continued:</b>\n\n"
-    if message.strip():
-        msgs.append(message)
-    for m in msgs:
-        send_message(chat_id, m)
+    
+    # Ye helper HTML format me lambi lists ko safely 4-5 pages me bhej dega
+    send_long_message(chat_id, message)
 
 def handle_gainers_losers(chat_id, mode='gainers'):
     send_message(chat_id, "📡 Data fetch ho raha hai... thoda wait karo!")
@@ -479,7 +496,11 @@ def webhook():
             except:
                 data = {'ticker': 'UNKNOWN', 'action': 'ALERT'}
         data['time'] = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M')
-        alerts_today.append(data)
+        
+        # Only alert me daalein agar BUY/SELL ho, taaki spam na ho
+        if data.get('action', '').upper() in ['BUY', 'SELL']:
+            alerts_today.append(data)
+            
         ticker = data.get('ticker', 'UNKNOWN')
         stocks_data[ticker] = data
         message = format_alert_message(data)
@@ -508,7 +529,7 @@ def telegram_updates():
         elif text.startswith('/price'):
             handle_price(chat_id, text)
         elif text.startswith('/scan'):
-            send_message(chat_id, "🔍 Scan shuru ho raha hai... 2-3 minute lagenge!")
+            send_message(chat_id, "🔍 Scan shuru ho raha hai... isme 2-3 minute lagenge!")
             thread = threading.Thread(target=scan_all_stocks)
             thread.daemon = True
             thread.start()
